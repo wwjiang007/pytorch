@@ -965,6 +965,19 @@ class TestTensorExprFuser(BaseTestClass):
         assert np.isnan(warmup_and_run_forward(tmax, y, x).item())
         self.assertLastGraphAllFused()
 
+    def test_double_intrinsics(self):
+        # TODO: add "cpu" device once `pow` is supported there
+        devices = ["cuda"] if torch.cuda.is_available() else []
+
+        def do_pow(x):
+            return torch.pow(x, 7)
+
+        for device in devices:
+            x = torch.rand(10, dtype=torch.double, device=device)
+            traced = torch.jit.trace(do_pow, (x))
+            x = warmup_and_run_forward(traced, x)
+            self.assertLastGraphAllFused()
+
     def test_remainder(self):
         def run_remainder(x, y):
             c = torch.remainder(torch.add(x, y), x)
@@ -1226,21 +1239,36 @@ class TestTensorExprFuser(BaseTestClass):
         assert llvm.elapsed_value() == 1 or interp.elapsed_value() > 1
 
     def _test_softmax(self, device):
-        def test(x, y):
+        def test_softmax(x, y):
             a = F.softmax(x, dim=0, dtype=torch.float32)
             b = F.softmax(y, dim=0, dtype=torch.float32)
             c = F.softmax(x, dim=1, dtype=torch.float32)
             d = F.softmax(y, dim=1, dtype=torch.float32)
             return a + b + c + d
 
-        old = torch._C._jit_set_texpr_reductions_enabled(True)
-        traced = torch.jit.trace(test, (torch.randn(2, 3, device=device), torch.randn(2, 3, device=device)))
-        inp = torch.randn(2, 3, device=device)
-        res = traced(inp, inp)
-        # Use eager mode as reference.
-        ref = test(inp, inp)
-        np.testing.assert_allclose(ref, res.cpu().numpy(), rtol=1e-06, atol=1e-06)
-        torch._C._jit_set_texpr_reductions_enabled(old)
+        def test_softmax_neg_index(x, y):
+            a = F.softmax(x, dim=-2, dtype=torch.float32)
+            b = F.softmax(y, dim=-2, dtype=torch.float32)
+            c = F.softmax(x, dim=-1, dtype=torch.float32)
+            d = F.softmax(y, dim=-1, dtype=torch.float32)
+            return a + b + c + d
+
+        def test_log_softmax(x, y):
+            a = F.log_softmax(x, dim=0, dtype=torch.float32)
+            b = F.log_softmax(y, dim=0, dtype=torch.float32)
+            c = F.log_softmax(x, dim=1, dtype=torch.float32)
+            d = F.log_softmax(y, dim=1, dtype=torch.float32)
+            return a + b + c + d
+
+        for test in (test_softmax, test_log_softmax, test_softmax_neg_index):
+            old = torch._C._jit_set_texpr_reductions_enabled(True)
+            traced = torch.jit.trace(test, (torch.randn(2, 3, device=device), torch.randn(2, 3, device=device)))
+            inp = torch.randn(2, 3, device=device)
+            res = traced(inp, inp)
+            # Use eager mode as reference.
+            ref = test(inp, inp)
+            np.testing.assert_allclose(ref, res.cpu().numpy(), rtol=1e-06, atol=1e-06)
+            torch._C._jit_set_texpr_reductions_enabled(old)
 
     def test_softmax_cpu(self):
         llvm = LLVMCodeGenExecuted()
@@ -1271,44 +1299,20 @@ class TestTensorExprFuser(BaseTestClass):
             x = warmup_and_run_forward(traced, a, b)
             self.assertLastGraphAllFused()
 
-    def test_half_module_backward(self):
-        devices = ["cuda"] if torch.cuda.is_available() else []
-        dtype = torch.float16
+    def test_exp_pow(self):
+        devices = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
+
+        @torch.jit.script
+        def do_exp(x, y, z):
+            return ((x * y) * 2) * torch.pow(z, 2)
 
         for device in devices:
-            class HalfModule(nn.Module):
-                def __init__(self, inplanes, planes):
-                    super().__init__()
-
-                    self.fixup_bias2a = nn.Parameter(torch.zeros(1))
-                    self.fixup_scale = nn.Parameter(torch.ones(1))
-                    self.fixup_bias2b = nn.Parameter(torch.zeros(1))
-
-                def forward(self, x):
-                    identity = x
-                    out = x
-
-                    out = out + self.fixup_bias2a
-                    out = out * self.fixup_scale + self.fixup_bias2b
-
-                    return out * out + identity
-
-            net_ref = HalfModule(64, 64).to(dtype=dtype, device=device)
-            net = torch.jit.script(HalfModule(64, 64)).to(dtype=dtype, device=device)
-            inp = torch.randn(16, 64, 16, 16, dtype=dtype, device=device)
-
-            for i in range(10):
-                for param in net.parameters():
-                    param.grad = None
-                for param in net_ref.parameters():
-                    param.grad = None
-
-                net(inp).mean().backward()
-                net_ref(inp).mean().backward()
-
-            # check grad, allow a little tolerance due to parallelism.
-            for (p1, p2) in zip(net.parameters(), net_ref.parameters()):
-                np.testing.assert_allclose(p1.grad.cpu(), p2.grad.cpu(), rtol=0.02)
+            x = torch.rand(10, dtype=torch.double, device=device)
+            y = torch.rand(10, dtype=torch.double, device=device)
+            z = torch.rand(10, dtype=torch.double, device=device)
+            traced = torch.jit.trace(do_exp, (x, y, z))
+            x = warmup_and_run_forward(traced, x, y, z)
+            self.assertLastGraphAllFused()
 
     def test_transpose(self):
         @torch.jit.script
@@ -1485,6 +1489,39 @@ class TestTensorExprFuser(BaseTestClass):
         torch._C._jit_set_te_generate_block_code(val)
         torch._C._jit_texpr_set_fallback_allowed(fall_bk)
 
+    def test_strided_output_preserved(self):
+        def foo(a, b):
+            return a + b - a
+
+        # smaller, easier to debug example
+        x = torch.arange(6)
+        x = torch.as_strided(x, (2, 3), (1, 2))
+        total = 0
+        for i in range(2):
+            for j in range(3):
+                x[i, j] = total
+                total += 1
+        foo_script = torch.jit.script(foo)
+        foo_script(x, x)
+        foo_script(x, x)
+        out_s = foo_script(x, x)
+        out_eager = foo(x, x)
+        self.assertEqual(out_s, out_eager)
+        self.assertEqual(out_s.stride(), out_eager.stride())
+        self.assertLastGraphAllFused()
+
+        # more dims
+        N, C, H, W, = 2, 3, 4, 5
+        x = torch.rand(N, C, H, W).to(memory_format=torch.channels_last)
+        foo_script = torch.jit.script(foo)
+        foo_script(x, x)
+        foo_script(x, x)
+        out_s = foo_script(x, x)
+        out_eager = foo(x, x)
+        self.assertEqual(out_s, out_eager)
+        self.assertEqual(out_s.stride(), out_eager.stride())
+        self.assertLastGraphAllFused()
+
     def test_alias_analysis_module(self):
         class AliasModule(nn.Module):
             def __init__(self):
@@ -1590,6 +1627,26 @@ class TestTensorExprFuser(BaseTestClass):
         test = am_s(x, x, x)
 
         torch.testing.assert_allclose(ref, test)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "requires CUDA")
+    def test_multiple_outputs(self):
+        # A bug reported internally similar to the one reported in #48533
+        def foo(a, b, c):
+            t_next = c + 1
+            t5 = t_next * b
+            t6 = torch.unsqueeze(t_next, 1)
+            t7 = a * t6
+            return (t7, t5, t_next)
+
+        a = torch.rand(20, 20, dtype=torch.float32, device='cuda')
+        b = torch.rand(20 * 29, dtype=torch.float32, device='cuda').as_strided([20], [29])
+        c = torch.ones(20, dtype=torch.int64, device='cuda')
+        traced = torch.jit.trace(foo, (a, b, c))
+        ref = foo(a, b, c)
+        exp = traced(a, b, c)
+        exp = traced(a, b, c)
+        for i in range(3):
+            assert(torch.allclose(ref[i], exp[i]))
 
 
 if __name__ == '__main__':

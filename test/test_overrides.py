@@ -4,7 +4,6 @@ import unittest
 import inspect
 import functools
 import pprint
-import pickle
 
 from torch.testing._internal.common_utils import TestCase
 from torch.overrides import (
@@ -822,14 +821,61 @@ class TestGradCheckOverride(TestCase):
             torch.add,
         })
 
-class TestPickle(TestCase):
-    "Regression test for gh-47051"
-    def test_pickle(self):
-        t = torch.tensor([1]).as_subclass(SubTensor2)
-        t.abcd = "e"
-        t2 = pickle.loads(pickle.dumps(t))
-        self.assertIs(type(t2), SubTensor2)
-        self.assertEqual(t2.abcd, "e")
+class TestNamedTuple(TestCase):
+    """ Regression test for gh-47090 """
+    def test_max(self):
+        x = torch.tensor([1, 2])
+        xs = x.as_subclass(SubTensor2)
+        r = torch.max(x, dim=0)
+        rs = torch.max(xs, dim=0)
+        self.assertEqual(type(r), type(rs))
+        self.assertEqual(r, rs)
+
+class TestGradNewOnesOverride(TestCase):
+    """ Regression test for gh-47069 """
+    def test_newones(self):
+        t = torch.tensor([1, 2]).as_subclass(SubTensor2)
+        n = t.new_ones((1, 2))
+        self.assertEqual(type(n), SubTensor2)
+
+
+class TestBroadcastAllOverride(TestCase):
+    """ test for gh-37141 """
+    def test_broadcast_all(self):
+        from torch.distributions.utils import broadcast_all
+        a = torch.tensor([1.2, 3.4, 5.6])
+        a_w = Wrapper(a)
+        b = torch.tensor(5.0)
+        b_w = Wrapper(b)
+        c = torch.tensor([5.0, 5.0, 5.0])
+
+        o_1 = broadcast_all(a_w, b_w)
+        self.assertTrue(isinstance(o_1[0], Wrapper))
+        self.assertTrue(isinstance(o_1[1], Wrapper))
+        self.assertEqual(o_1[0]._data, a)
+        self.assertEqual(o_1[1]._data, c)
+
+        o_2 = broadcast_all(a_w, b)
+        self.assertTrue(isinstance(o_2[0], Wrapper))
+        self.assertTrue(isinstance(o_2[1], Wrapper))
+        self.assertEqual(o_2[0]._data, a)
+        self.assertEqual(o_2[1]._data, c)
+
+class TestWrapTorchFunction(TestCase):
+    def test_wrap_torch_function(self):
+        class A:
+            @classmethod
+            def __torch_function__(cls, func, types, args, kwargs):
+                return -1
+
+        def dispatcher(a):
+            return (a,)
+
+        @torch.overrides.wrap_torch_function(dispatcher)
+        def f(a):
+            return a
+
+        self.assertEqual(f(A()), -1)
 
 if __name__ == '__main__':
     unittest.main()
