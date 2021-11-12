@@ -226,9 +226,6 @@ if(INTERN_BUILD_ATEN_OPS)
   file(GLOB_RECURSE sources_templates "${CMAKE_CURRENT_LIST_DIR}/../aten/src/ATen/templates/*\.cpp")
   set(declarations_yaml_templates "")
 
-  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/aten/src/ATen)
-  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/aten/src/ATen/core)
-
   foreach(gen_type "headers" "sources" "declarations_yaml")
     # The codegen outputs may change dynamically as PyTorch is
     # developed, but add_custom_command only supports dynamic inputs.
@@ -258,13 +255,23 @@ if(INTERN_BUILD_ATEN_OPS)
     include("${CMAKE_BINARY_DIR}/aten/src/ATen/generated_${gen_type}.cmake")
     include("${CMAKE_BINARY_DIR}/aten/src/ATen/core_generated_${gen_type}.cmake")
     include("${CMAKE_BINARY_DIR}/aten/src/ATen/cuda_generated_${gen_type}.cmake")
+    include("${CMAKE_BINARY_DIR}/aten/src/ATen/ops_generated_${gen_type}.cmake")
+
+    set(gen_outputs
+        ${generated_${gen_type}}
+        ${cuda_generated_${gen_type}}
+        ${core_generated_${gen_type}}
+        ${ops_generated_${gen_type}}
+        ${CMAKE_BINARY_DIR}/aten/src/ATen/generated_${gen_type}.cmake
+        ${CMAKE_BINARY_DIR}/aten/src/ATen/ops_generated_${gen_type}.cmake
+        ${CMAKE_BINARY_DIR}/aten/src/ATen/core_generated_${gen_type}.cmake
+        ${CMAKE_BINARY_DIR}/aten/src/ATen/cuda_generated_${gen_type}.cmake)
+
+    message(STATUS "${gen_type} outputs: ${gen_outputs}")
 
     add_custom_command(
       COMMENT "Generating ATen ${gen_type}"
-      OUTPUT ${generated_${gen_type}} ${cuda_generated_${gen_type}} ${core_generated_${gen_type}}
-        ${CMAKE_BINARY_DIR}/aten/src/ATen/generated_${gen_type}.cmake
-        ${CMAKE_BINARY_DIR}/aten/src/ATen/core_generated_${gen_type}.cmake
-        ${CMAKE_BINARY_DIR}/aten/src/ATen/cuda_generated_${gen_type}.cmake
+      OUTPUT ${gen_outputs}
       COMMAND ${GEN_COMMAND_${gen_type}}
       DEPENDS ${all_python} ${${gen_type}_templates}
         ${CMAKE_CURRENT_LIST_DIR}/../aten/src/ATen/native/native_functions.yaml
@@ -276,8 +283,8 @@ if(INTERN_BUILD_ATEN_OPS)
   # not tracked correctly in CMake. We make the libATen.so depend explicitly
   # on building the generated ATen files to workaround.
   add_custom_target(ATEN_CPU_FILES_GEN_TARGET DEPENDS
-      ${generated_headers} ${core_generated_headers}
-      ${generated_sources} ${core_generated_sources}
+      ${generated_headers} ${core_generated_headers} ${ops_generated_headers}
+      ${generated_sources} ${core_generated_sources} ${ops_generated_sources}
       ${generated_declarations_yaml})
   add_custom_target(ATEN_CUDA_FILES_GEN_TARGET DEPENDS
       ${cuda_generated_headers} ${cuda_generated_sources})
